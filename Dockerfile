@@ -1,94 +1,127 @@
-#syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.7-labs
+FROM php:8.3-fpm
 
-# Versions
-FROM dunglas/frankenphp:1-php8.3 AS frankenphp_upstream
+# set main params
+ARG BUILD_ARGUMENT_ENV=dev
+ENV ENV=$BUILD_ARGUMENT_ENV
+ENV APP_HOME /var/www/html
+ARG HOST_UID=1000
+ARG HOST_GID=1000
+ENV USERNAME=www-data
+ARG INSIDE_DOCKER_CONTAINER=1
+ENV INSIDE_DOCKER_CONTAINER=$INSIDE_DOCKER_CONTAINER
+ARG XDEBUG_CONFIG=main
+ENV XDEBUG_CONFIG=$XDEBUG_CONFIG
+ARG XDEBUG_VERSION=3.3.2
+ENV XDEBUG_VERSION=$XDEBUG_VERSION
 
-# The different stages of this Dockerfile are meant to be built into separate images
-# https://docs.docker.com/develop/develop-images/multistage-build/#stop-at-a-specific-build-stage
-# https://docs.docker.com/compose/compose-file/#target
+# check environment
+RUN if [ "$BUILD_ARGUMENT_ENV" = "default" ]; then echo "Set BUILD_ARGUMENT_ENV in docker build-args like --build-arg BUILD_ARGUMENT_ENV=dev" && exit 2; \
+    elif [ "$BUILD_ARGUMENT_ENV" = "dev" ]; then echo "Building development environment."; \
+    elif [ "$BUILD_ARGUMENT_ENV" = "test" ]; then echo "Building test environment."; \
+    elif [ "$BUILD_ARGUMENT_ENV" = "staging" ]; then echo "Building staging environment."; \
+    elif [ "$BUILD_ARGUMENT_ENV" = "prod" ]; then echo "Building production environment."; \
+    else echo "Set correct BUILD_ARGUMENT_ENV in docker build-args like --build-arg BUILD_ARGUMENT_ENV=dev. Available choices are dev,test,staging,prod." && exit 2; \
+    fi
 
+# install all the dependencies and enable PHP modules
+RUN apt-get update && apt-get upgrade -y && apt-get install -y \
+      bash-completion \
+      fish \
+      procps \
+      nano \
+      git \
+      unzip \
+      libicu-dev \
+      zlib1g-dev \
+      libxml2 \
+      libxml2-dev \
+      libreadline-dev \
+      supervisor \
+      cron \
+      sudo \
+      libzip-dev \
+      wget \
+      librabbitmq-dev \
+      debsecan \
+    && pecl install amqp \
+    && docker-php-ext-configure pdo_mysql --with-pdo-mysql=mysqlnd \
+    && docker-php-ext-configure intl \
+    && yes '' | pecl install -o -f redis && docker-php-ext-enable redis \
+    && docker-php-ext-install \
+      pdo_mysql \
+      sockets \
+      intl \
+      opcache \
+      zip \
+    && docker-php-ext-enable amqp \
+    && apt-get install --no-install-recommends -y \
+        $(debsecan --suite bookworm --format packages --only-fixed) \
+    && rm -rf /tmp/* \
+    && rm -rf /var/list/apt/* \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
 
-# Base FrankenPHP image
-FROM frankenphp_upstream AS frankenphp_base
+# create document root, fix permissions for www-data user and change owner to www-data
+RUN mkdir -p $APP_HOME/public && \
+    mkdir -p /home/$USERNAME && chown $USERNAME:$USERNAME /home/$USERNAME \
+    && usermod -o -u $HOST_UID $USERNAME -d /home/$USERNAME \
+    && groupmod -o -g $HOST_GID $USERNAME \
+    && chown -R ${USERNAME}:${USERNAME} $APP_HOME
 
-WORKDIR /app
+# put php config for Symfony
+COPY ./docker/$BUILD_ARGUMENT_ENV/www.conf /usr/local/etc/php-fpm.d/www.conf
+COPY ./docker/$BUILD_ARGUMENT_ENV/php.ini /usr/local/etc/php/php.ini
 
-VOLUME /app/var/
+# install Xdebug in case dev/test environment
+COPY ./docker/general/do_we_need_xdebug.sh /tmp/
+COPY ./docker/dev/xdebug-${XDEBUG_CONFIG}.ini /tmp/xdebug.ini
+RUN apt-get update && apt-get install -y dos2unix
+RUN dos2unix /tmp/do_we_need_xdebug.sh
+RUN chmod u+x /tmp/do_we_need_xdebug.sh && /bin/bash /tmp/do_we_need_xdebug.sh
 
-# persistent / runtime deps
-# hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends \
-	acl \
-	file \
-	gettext \
-	git \
-	&& rm -rf /var/lib/apt/lists/*
+# install composer
+COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+RUN chmod +x /usr/bin/composer
+ENV COMPOSER_ALLOW_SUPERUSER 1
 
-RUN set -eux; \
-	install-php-extensions \
-		@composer \
-		apcu \
-		intl \
-		opcache \
-		zip \
-	;
+# Enable Composer autocompletion
+RUN composer completion bash > /etc/bash_completion.d/composer
 
-# https://getcomposer.org/doc/03-cli.md#composer-allow-superuser
-ENV COMPOSER_ALLOW_SUPERUSER=1
+# add supervisor
+RUN mkdir -p /var/log/supervisor
+COPY --chown=root:root ./docker/general/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+COPY --chown=root:crontab ./docker/general/cron /var/spool/cron/crontabs/root
+RUN chmod 0600 /var/spool/cron/crontabs/root
 
-ENV PHP_INI_SCAN_DIR=":$PHP_INI_DIR/app.conf.d"
+# set working directory
+WORKDIR $APP_HOME
 
-###> recipes ###
-###< recipes ###
+USER ${USERNAME}
 
-COPY --link frankenphp/conf.d/10-app.ini $PHP_INI_DIR/app.conf.d/
-COPY --link --chmod=755 frankenphp/docker-entrypoint.sh /usr/local/bin/docker-entrypoint
-COPY --link frankenphp/Caddyfile /etc/caddy/Caddyfile
+# Add necessary stuff to bash autocomplete
+RUN echo 'source /usr/share/bash-completion/bash_completion' >> /home/${USERNAME}/.bashrc \
+    && echo 'alias console="/var/www/html/bin/console"' >> /home/${USERNAME}/.bashrc
 
-ENTRYPOINT ["docker-entrypoint"]
+# copy fish configs
+COPY --chown=${USERNAME}:${USERNAME} ./docker/fish/completions/ /home/${USERNAME}/.config/fish/completions/
+COPY --chown=${USERNAME}:${USERNAME} ./docker/fish/functions/ /home/${USERNAME}/.config/fish/functions/
+COPY --chown=${USERNAME}:${USERNAME} ./docker/fish/config.fish /home/${USERNAME}/.config/fish/config.fish
 
-HEALTHCHECK --start-period=60s CMD curl -f http://localhost:2019/metrics || exit 1
-CMD [ "frankenphp", "run", "--config", "/etc/caddy/Caddyfile" ]
+# copy source files
+COPY --chown=${USERNAME}:${USERNAME} . $APP_HOME/
 
-# Dev FrankenPHP image
-FROM frankenphp_base AS frankenphp_dev
+# install all PHP dependencies
+RUN if [ "$BUILD_ARGUMENT_ENV" = "dev" ] || [ "$BUILD_ARGUMENT_ENV" = "test" ]; then COMPOSER_MEMORY_LIMIT=-1 composer install --optimize-autoloader --no-interaction --no-progress; \
+    else export APP_ENV=$BUILD_ARGUMENT_ENV && COMPOSER_MEMORY_LIMIT=-1 composer install --optimize-autoloader --no-interaction --no-progress --no-dev; \
+    fi
 
-ENV APP_ENV=dev XDEBUG_MODE=off
+# checks for security vulnerability advisories for installed packages in case dev/test environment
+RUN if [ "$BUILD_ARGUMENT_ENV" = "dev" ] || [ "$BUILD_ARGUMENT_ENV" = "test" ]; then COMPOSER_MEMORY_LIMIT=-1 composer audit; \
+    fi
 
-RUN mv "$PHP_INI_DIR/php.ini-development" "$PHP_INI_DIR/php.ini"
+# create cached config file .env.local.php in case staging/prod environment
+RUN if [ "$BUILD_ARGUMENT_ENV" = "staging" ] || [ "$BUILD_ARGUMENT_ENV" = "prod" ]; then composer dump-env $BUILD_ARGUMENT_ENV; \
+    fi
 
-RUN set -eux; \
-	install-php-extensions \
-		xdebug \
-	;
-
-COPY --link frankenphp/conf.d/20-app.dev.ini $PHP_INI_DIR/app.conf.d/
-
-CMD [ "frankenphp", "run", "--config", "/etc/caddy/Caddyfile", "--watch" ]
-
-# Prod FrankenPHP image
-FROM frankenphp_base AS frankenphp_prod
-
-ENV APP_ENV=prod
-ENV FRANKENPHP_CONFIG="import worker.Caddyfile"
-
-RUN mv "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini"
-
-COPY --link frankenphp/conf.d/20-app.prod.ini $PHP_INI_DIR/app.conf.d/
-COPY --link frankenphp/worker.Caddyfile /etc/caddy/worker.Caddyfile
-
-# prevent the reinstallation of vendors at every changes in the source code
-COPY --link composer.* symfony.* ./
-RUN set -eux; \
-	composer install --no-cache --prefer-dist --no-dev --no-autoloader --no-scripts --no-progress
-
-# copy sources
-COPY --link . ./
-RUN rm -Rf frankenphp/
-
-RUN set -eux; \
-	mkdir -p var/cache var/log; \
-	composer dump-autoload --classmap-authoritative --no-dev; \
-	composer dump-env prod; \
-	composer run-script --no-dev post-install-cmd; \
-	chmod +x bin/console; sync;
+USER root

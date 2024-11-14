@@ -1,34 +1,30 @@
-**/*.log
-**/*.md
-**/*.php~
-**/*.dist.php
-**/*.dist
-**/*.cache
-**/._*
-**/.dockerignore
-**/.DS_Store
-**/.git/
-**/.gitattributes
-**/.gitignore
-**/.gitmodules
-**/compose.*.yaml
-**/compose.*.yml
-**/compose.yaml
-**/compose.yml
-**/docker-compose.*.yaml
-**/docker-compose.*.yml
-**/docker-compose.yaml
-**/docker-compose.yml
-**/Dockerfile
-**/Thumbs.db
-.github/
-docs/
-public/bundles/
-tests/
-var/
-vendor/
-.editorconfig
-.env.*.local
-.env.local
-.env.local.php
-.env.test
+### User-specific stuff:
+/.git*
+/.idea/workspace.xml
+.dockerignore
+
+###> symfony/framework-bundle ###
+/.env.local
+/.env.*.local
+/.env.local.php
+/public/bundles/
+/vendor/
+###< symfony/framework-bundle ###
+
+### Other data
+/var/mysql-data
+/var/rabbitmq
+/var/elasticsearch-data
+/var/redis
+
+### Vendor bin dependencies
+/tools/*/vendor/
+.phpunit.cache
+.phpunit.result.cache
+
+### Docker
+Dockerfile
+compose.yaml
+compose-test-ci.yaml
+compose-staging.yaml
+compose-prod.yaml
